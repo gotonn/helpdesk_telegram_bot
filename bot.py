@@ -2,6 +2,7 @@ import asyncio
 import os
 import csv
 import requests
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, 
@@ -20,38 +21,32 @@ from aiogram.fsm.state import State, StatesGroup
 
 import database
 
-# Наш токен (заданий напряму)
 BOT_TOKEN = "8734454151:AAEtZ5qyxEVnkArWDrwgHDKbd0XxS-sBQ2c"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Головне меню (3 кнопки)
 main_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🛠 Створити заявку")],[KeyboardButton(text="📋 Мої заявки"), KeyboardButton(text="📊 Завантажити звіт")]
+    keyboard=[[KeyboardButton(text="🛠 Створити заявку")],[KeyboardButton(text="📋 Мої заявки"), KeyboardButton(text="📊 Завантажити звіт")]
     ],
     resize_keyboard=True,
     input_field_placeholder="Оберіть дію нижче..."
 )
 
-# Клавіатура для вибору техніки
 equip_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="💻 Ноутбук/ПК"), KeyboardButton(text="🖨 Принтер")],[KeyboardButton(text="🌐 Мережа/Інтернет"), KeyboardButton(text="❌ Скасувати")]
+    keyboard=[
+        [KeyboardButton(text="💻 Ноутбук/ПК"), KeyboardButton(text="🖨 Принтер")],[KeyboardButton(text="🌐 Мережа/Інтернет"), KeyboardButton(text="❌ Скасувати")]
     ],
     resize_keyboard=True
 )
 
-# Стани для покрокового створення заявки (FSM)
 class TicketState(StatesGroup):
     equipment = State()
     cabinet = State()
     description = State()
 
-# --- СТАРТ БОТА ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    # Реєструємо користувача в базі
     database.add_user(message.from_user.id, message.from_user.full_name)
     await message.answer(
         f"Вітаю, {message.from_user.full_name}! 👋\n"
@@ -59,7 +54,6 @@ async def cmd_start(message: Message):
         reply_markup=main_kb
     )
 
-# --- СТВОРЕННЯ ЗАЯВКИ (FSM) ---
 @dp.message(F.text == "🛠 Створити заявку")
 async def start_ticket(message: Message, state: FSMContext):
     await message.answer("Що саме зламалося? Оберіть з варіантів:", reply_markup=equip_kb)
@@ -82,16 +76,13 @@ async def process_cabinet(message: Message, state: FSMContext):
     await message.answer("Коротко опишіть проблему:")
     await state.set_state(TicketState.description)
 
-# СТОРОННЄ API (Вимога №4) + Запис у БД
 @dp.message(TicketState.description)
 async def process_description(message: Message, state: FSMContext):
     data = await state.get_data()
     
-    # Зберігаємо в БД та отримуємо ID заявки
     ticket_id = database.add_ticket(message.from_user.id, data['equipment'], data['cabinet'], message.text)
     await state.clear()
 
-    # Звертаємось до відкритого API для генерації QR-коду
     api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=Ticket_ID_{ticket_id}"
     qr_photo = URLInputFile(api_url)
 
@@ -101,7 +92,6 @@ async def process_description(message: Message, state: FSMContext):
         reply_markup=main_kb
     )
 
-# --- ПЕРЕГЛЯД ТА РЕДАГУВАННЯ ЗАЯВОК (Вимога №2) ---
 @dp.message(F.text == "📋 Мої заявки")
 async def view_my_tickets(message: Message):
     tickets = database.get_user_tickets(message.from_user.id)
@@ -116,7 +106,6 @@ async def view_my_tickets(message: Message):
         status = t[3]
         text = f"🔧 <b>{t[1]}</b> (Каб. {t[2]})\nСтатус: {status}"
         
-        # Створюємо інлайн-кнопки (Закрити та Видалити)
         inline_kb = None
         if "Відкрита" in status:
             inline_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Позначити як вирішено", callback_data=f"close_{ticket_id}")],[InlineKeyboardButton(text="🗑 Видалити заявку", callback_data=f"delete_{ticket_id}")]
@@ -124,13 +113,11 @@ async def view_my_tickets(message: Message):
             
         await message.answer(text, parse_mode="HTML", reply_markup=inline_kb)
 
-# Обробник натискання "Вирішено" (Оновлення БД)
 @dp.callback_query(F.data.startswith("close_"))
 async def close_ticket_callback(callback: CallbackQuery):
     ticket_id = int(callback.data.split("_")[1])
-    database.close_ticket(ticket_id) # Оновлюємо статус у базі
+    database.close_ticket(ticket_id) 
     
-    # Редагуємо повідомлення, щоб кнопки зникли
     await callback.message.edit_text(
         f"{callback.message.text}\n\n<i>Оновлено: Вирішено ✅</i>", 
         parse_mode="HTML",
@@ -138,13 +125,11 @@ async def close_ticket_callback(callback: CallbackQuery):
     )
     await callback.answer("Статус заявки оновлено!")
 
-# Обробник натискання "Видалити" (Видалення з БД)
 @dp.callback_query(F.data.startswith("delete_"))
 async def delete_ticket_callback(callback: CallbackQuery):
     ticket_id = int(callback.data.split("_")[1])
-    database.delete_ticket(ticket_id) # Видаляємо з бази
+    database.delete_ticket(ticket_id) 
     
-    # Редагуємо повідомлення
     await callback.message.edit_text(
         f"<i>🚫 Заявку №{ticket_id} було назавжди видалено з бази даних.</i>", 
         parse_mode="HTML",
@@ -152,7 +137,6 @@ async def delete_ticket_callback(callback: CallbackQuery):
     )
     await callback.answer("Заявку видалено!")
 
-# --- ЕКСПОРТ CSV ЗВІТУ (Робота з файлами) ---
 @dp.message(F.text == "📊 Завантажити звіт")
 async def export_tickets(message: Message):
     await message.answer("⏳ Генерую звіт, зачекайте...")
@@ -160,23 +144,30 @@ async def export_tickets(message: Message):
     
     filename = "helpdesk_report.csv"
     
-    # Створюємо файл CSV (utf-8-sig для підтримки української мови в Excel)
     with open(filename, mode='w', encoding='utf-8-sig', newline='') as file:
         writer = csv.writer(file, delimiter=';')
         writer.writerow(['ID Заявки', 'Обладнання', 'Кабінет', 'Опис', 'Статус'])
         for t in tickets:
             writer.writerow([t[0], t[1], t[2], t[3], t[4]])
             
-    # Відправляємо файл у Telegram
     document = FSInputFile(filename)
     await message.answer_document(document, caption="📊 Ось ваш звіт по всіх заявках!")
-    
-    # Видаляємо файл з комп'ютера, щоб не засмічувати пам'ять сервера
     os.remove(filename)
 
-# --- ЗАПУСК БОТА ---
+async def healthcheck_handler(request):
+    return web.Response(text="Bot is running.")
+
 async def main():
-    print("Бот запущений! (Повна версія: API, БД, CSV, Редагування та Видалення)")
+    app = web.Application()
+    app.router.add_get('/', healthcheck_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+
+    print("Service started.")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
